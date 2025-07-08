@@ -9,16 +9,18 @@ import os
 from PIL import Image, ImageTk
 
 try:
-    from ..src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_CAPACITY, CHL_UNTITLED
+    from ..src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, CHL_UNTITLED
     from ..src.visualization import DEFAULT_COLOR_MAPS
     from .dialogs import PropertiesDialog, AboutDialog
     from .settings_manager import SettingsManager
 except ImportError:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    from chladni_py.src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_CAPACITY, CHL_UNTITLED
+    from chladni_py.src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, CHL_UNTITLED
     from chladni_py.src.visualization import DEFAULT_COLOR_MAPS
     from chladni_py.ui.dialogs import PropertiesDialog, AboutDialog
     from chladni_py.ui.settings_manager import SettingsManager
+    # Import constants for validation if needed, or handle in simulator
+    from ..src.core import MIN_AMPLITUDE, MAX_AMPLITUDE, MIN_FREQ_RATIO, MAX_FREQ_RATIO, MIN_ANGLE, MAX_ANGLE
 
 
 class ChladniApp:
@@ -43,6 +45,10 @@ class ChladniApp:
         self.status_message_var = tk.StringVar(value="Ready")
         self.status_imgsize_var = tk.StringVar(value=f"{self.simulator.width}x{self.simulator.height}")
         self.status_zoom_var = tk.StringVar(value="100%")
+
+        self._treeview_edit_entry: ttk.Entry | None = None # For in-place cell editing
+        self._treeview_edit_item_id: str | None = None
+        self._treeview_edit_column_id: str | None = None
 
         self.create_widgets()
         self.update_title()
@@ -112,6 +118,7 @@ class ChladniApp:
         self.wave_grid.heading("phase", text="Phase"); self.wave_grid.column("phase", width=70, anchor=tk.E)
         wave_grid_scrollbar = ttk.Scrollbar(self.wave_grid_frame, orient="vertical", command=self.wave_grid.yview); self.wave_grid.configure(yscrollcommand=wave_grid_scrollbar.set)
         wave_grid_scrollbar.pack(side=tk.RIGHT, fill=tk.Y); self.wave_grid.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        self.wave_grid.bind("<Double-1>", self._on_wave_grid_double_click)
         self.left_panel.pack_propagate(False)
 
         self.right_panel = ttk.Frame(content_frame, width=180, relief=tk.SUNKEN, borderwidth=1); self.right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0))
@@ -347,6 +354,139 @@ class ChladniApp:
             else: self.set_status_message("Properties unchanged.")
 
     def on_help_about(self): AboutDialog(self.root)
+
+    # --- Wave Grid Editing Methods ---
+    def _destroy_cell_editor(self):
+        if self._treeview_edit_entry:
+            self._treeview_edit_entry.destroy()
+            self._treeview_edit_entry = None
+            self._treeview_edit_item_id = None
+            self._treeview_edit_column_id = None
+
+    def _cancel_cell_edit(self, event=None):
+        self._destroy_cell_editor()
+
+    def _apply_cell_edit(self, event=None):
+        if not self._treeview_edit_entry or \
+           self._treeview_edit_item_id is None or \
+           self._treeview_edit_column_id is None:
+            self._destroy_cell_editor()
+            return
+
+        new_value_str = self._treeview_edit_entry.get()
+        wave_idx = int(self._treeview_edit_item_id)
+        column_id = self._treeview_edit_column_id
+
+        # print(f"Applying edit: wave_idx={wave_idx}, col={column_id}, val='{new_value_str}'")
+
+        try:
+            new_value_float = float(new_value_str)
+            wave_info = self.simulator.wave_infos[wave_idx]
+
+            original_params_for_undo_or_comparison = (wave_info.amplitude, wave_info.frequency, wave_info.phase)
+            param_changed = False
+
+            if column_id == "amplitude":
+                clamped_value = max(MIN_AMPLITUDE, min(new_value_float, MAX_AMPLITUDE))
+                if wave_info.amplitude != clamped_value:
+                    wave_info.amplitude = clamped_value
+                    param_changed = True
+            elif column_id == "frequency":
+                clamped_value = max(MIN_FREQ_RATIO, min(new_value_float, MAX_FREQ_RATIO))
+                if wave_info.frequency != clamped_value:
+                    wave_info.frequency = clamped_value
+                    param_changed = True
+            elif column_id == "phase":
+                clamped_value = max(MIN_ANGLE, min(new_value_float, MAX_ANGLE))
+                if wave_info.phase != clamped_value:
+                    wave_info.phase = clamped_value
+                    param_changed = True
+
+            if param_changed:
+                self.simulator.modified = True
+                self.update_title()
+                # Update only the specific item in treeview for efficiency
+                on_display = "✓" if wave_info.on else "✗"
+                self.wave_grid.item(str(wave_idx), values=(
+                    on_display, f"{wave_info.amplitude:.4f}",
+                    f"{wave_info.frequency:.4f}", f"{wave_info.phase:.1f}"
+                ))
+                # self.update_wave_grid() # Full refresh, less efficient
+
+        except ValueError:
+            messagebox.showerror("Invalid Input", f"Invalid value for {column_id}: '{new_value_str}'. Please enter a number.")
+        except IndexError:
+            messagebox.showerror("Error", "Invalid wave index.")
+        finally:
+            self._destroy_cell_editor()
+
+
+    def _on_wave_grid_double_click(self, event):
+        self._destroy_cell_editor() # Clear any previous editor
+
+        region = self.wave_grid.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        column_id_num_str = self.wave_grid.identify_column(event.x) # e.g., "#1", "#2"
+        column_idx = int(column_id_num_str.replace("#", "")) -1 # Convert to 0-based index
+
+        # Get column identifier string (e.g., "amplitude")
+        # The `columns` tuple in Treeview definition is 0-indexed.
+        # `self.wave_grid['columns']` gives ('on', 'amplitude', 'frequency', 'phase')
+        column_id_str = self.wave_grid['columns'][column_idx]
+
+        item_id = self.wave_grid.identify_row(event.y) # This is our wave index as string
+
+        if not item_id: # Clicked on header or empty space
+            return
+
+        # print(f"Double click: item={item_id}, col_id_num={column_id_num_str}, col_idx={column_idx}, col_id_str='{column_id_str}'")
+
+        # --- Handle "On/Off" column ---
+        if column_id_str == "on":
+            wave_idx = int(item_id)
+            try:
+                wave_info = self.simulator.wave_infos[wave_idx]
+                wave_info.on = not wave_info.on
+                self.simulator.modified = True
+                self.update_title()
+                # Update just this row in the grid
+                on_display = "✓" if wave_info.on else "✗"
+                self.wave_grid.item(item_id, values=(
+                    on_display, f"{wave_info.amplitude:.4f}",
+                    f"{wave_info.frequency:.4f}", f"{wave_info.phase:.1f}"
+                ))
+            except IndexError:
+                messagebox.showerror("Error", "Invalid wave index for toggling 'on' state.")
+            return # Done with "on" column
+
+        # --- Handle Numerical Columns (Amplitude, Frequency, Phase) ---
+        if column_id_str in ["amplitude", "frequency", "phase"]:
+            x, y, width, height = self.wave_grid.bbox(item_id, column=column_id_num_str)
+
+            # Get the raw, unformatted value from the simulator
+            wave_idx = int(item_id)
+            wave_info = self.simulator.wave_infos[wave_idx]
+            current_value = ""
+            if column_id_str == "amplitude": current_value = wave_info.amplitude
+            elif column_id_str == "frequency": current_value = wave_info.frequency
+            elif column_id_str == "phase": current_value = wave_info.phase
+
+            entry_var = tk.StringVar(value=str(current_value))
+            self._treeview_edit_entry = ttk.Entry(self.wave_grid_frame, textvariable=entry_var, justify=tk.RIGHT) # Use wave_grid_frame as parent
+            self._treeview_edit_entry.place(x=x, y=y, width=width, height=height, anchor='nw')
+
+            self._treeview_edit_item_id = item_id
+            self._treeview_edit_column_id = column_id_str # Store the string ID
+
+            self._treeview_edit_entry.focus_set()
+            self._treeview_edit_entry.select_range(0, tk.END)
+
+            self._treeview_edit_entry.bind("<Return>", self._apply_cell_edit)
+            self._treeview_edit_entry.bind("<FocusOut>", self._apply_cell_edit) # Apply on lose focus
+            self._treeview_edit_entry.bind("<Escape>", self._cancel_cell_edit)
+
     def run(self): self.root.mainloop()
 
 def main():
