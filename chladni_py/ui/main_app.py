@@ -9,13 +9,13 @@ import os
 from PIL import Image, ImageTk
 
 try:
-    from ..src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, CHL_UNTITLED
+    from ..src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_CAPACITY, CHL_UNTITLED
     from ..src.visualization import DEFAULT_COLOR_MAPS
     from .dialogs import PropertiesDialog, AboutDialog
     from .settings_manager import SettingsManager
 except ImportError:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    from chladni_py.src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, CHL_UNTITLED
+    from chladni_py.src.chladni_engine import ChladniSimulator, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_CAPACITY, CHL_UNTITLED
     from chladni_py.src.visualization import DEFAULT_COLOR_MAPS
     from chladni_py.ui.dialogs import PropertiesDialog, AboutDialog
     from chladni_py.ui.settings_manager import SettingsManager
